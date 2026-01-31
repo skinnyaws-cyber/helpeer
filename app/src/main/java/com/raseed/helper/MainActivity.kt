@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -16,7 +17,9 @@ import android.telecom.PhoneAccountHandle
 import android.telecom.TelecomManager
 import android.telephony.SubscriptionManager
 import android.view.View
-import android.view.animation.Animation
+import android.widget.EditText
+import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -25,9 +28,12 @@ import com.google.firebase.FirebaseApp
 import com.google.firebase.firestore.DocumentChange
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import java.io.File
+import java.io.FileWriter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.system.exitProcess
 
 class MainActivity : AppCompatActivity() {
 
@@ -36,10 +42,13 @@ class MainActivity : AppCompatActivity() {
     private var currentCardOrder: Order? = null
     private val EXPORTED_FLAG = 2
     
-    // متغيرات العدادات
+    // متغيرات التحكم الجديدة
+    private var isMaintenanceMode = false
     private var successCounter = 0
     private var failedCounter = 0
+    private var lastAlertTime = 0L
 
+    // مستقبل نتائج USSD
     private val ussdResultReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == "com.raseed.helper.USSD_RESULT") {
@@ -50,52 +59,135 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // مستقبل حالة البطارية
+    private val batteryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+            val temp = intent?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0
+            
+            val batteryPct = level * 100 / scale.toFloat()
+            val tempC = temp / 10.0 // الحرارة تأتي مضروبة بـ 10
+
+            updateDeviceHealthUI(batteryPct, tempC)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        val filter = IntentFilter("com.raseed.helper.USSD_RESULT")
+        // تسجيل المستقبلات
+        val filterUSSD = IntentFilter("com.raseed.helper.USSD_RESULT")
+        val filterBattery = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+        
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            registerReceiver(ussdResultReceiver, filter, EXPORTED_FLAG)
+            registerReceiver(ussdResultReceiver, filterUSSD, EXPORTED_FLAG)
+            registerReceiver(batteryReceiver, filterBattery, EXPORTED_FLAG)
         } else {
-            registerReceiver(ussdResultReceiver, filter)
+            registerReceiver(ussdResultReceiver, filterUSSD)
+            registerReceiver(batteryReceiver, filterBattery)
         }
+
+        setupControls() // تفعيل أزرار التحكم الجديدة
 
         try {
             FirebaseApp.initializeApp(this)
-            logToConsole("System Online. Monitoring Orders...")
+            logToConsole("System Online. Ready for Incoming Credits.")
             updateServerStatus(true)
-            startPulseAnimation() // تشغيل النبض
+            startPulseAnimation()
             startListeningForOrders()
+            checkAndRequestPermissions()
         } catch (e: Exception) {
-            logToConsole("Firebase Init Failed: ${e.message}")
+            logToConsole("Init Failed: ${e.message}")
             updateServerStatus(false)
         }
-
-        binding.btnPermissions.setOnClickListener { checkAndRequestPermissions() }
     }
 
-    // === دالة النبض (Pulse Animation) ===
-    private fun startPulseAnimation() {
-        val scaleX = PropertyValuesHolder.ofFloat(View.SCALE_X, 1.2f)
-        val scaleY = PropertyValuesHolder.ofFloat(View.SCALE_Y, 1.2f)
-        val animator = ObjectAnimator.ofPropertyValuesHolder(binding.imgServerStatus, scaleX, scaleY)
-        animator.repeatCount = ObjectAnimator.INFINITE
-        animator.repeatMode = ObjectAnimator.REVERSE
-        animator.duration = 1000 // سرعة النبض (1 ثانية)
-        animator.start()
+    private fun setupControls() {
+        // 1. زر وضع الصيانة
+        binding.btnMaintenance.setOnClickListener {
+            isMaintenanceMode = !isMaintenanceMode
+            if (isMaintenanceMode) {
+                binding.btnMaintenance.text = "MAINTENANCE MODE"
+                binding.btnMaintenance.setIconTintResource(android.R.color.holo_orange_light)
+                binding.btnMaintenance.setTextColor(getColor(android.R.color.holo_orange_light))
+                logToConsole("!!! Maintenance Mode ENABLED. Orders paused.")
+            } else {
+                binding.btnMaintenance.text = "ACTIVE MODE"
+                binding.btnMaintenance.setIconTintResource(R.color.neon_green)
+                binding.btnMaintenance.setTextColor(getColor(R.color.white))
+                logToConsole("System Active. Resuming operations.")
+            }
+        }
+
+        // 2. زر الاختبار اليدوي
+        binding.btnTestMode.setOnClickListener {
+            showManualTestDialog()
+        }
+
+        // 3. زر إعدادات الشرائح (محاكاة حالياً)
+        binding.btnSimConfig.setOnClickListener {
+            Toast.makeText(this, "SIM Config Saved: Auto-Detect Active", Toast.LENGTH_SHORT).show()
+            logToConsole("SIM Config: Using Auto-Detection (Zain/Asia)")
+        }
+
+        // 4. زر تصدير السجلات
+        binding.btnExportLogs.setOnClickListener {
+            saveLogsToFile()
+        }
+
+        // 5. زر الطوارئ
+        binding.btnEmergency.setOnClickListener {
+            logToConsole("EMERGENCY RESTART INITIATED...")
+            val intent = packageManager.getLaunchIntentForPackage(packageName)
+            intent?.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            startActivity(intent)
+            exitProcess(0)
+        }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        unregisterReceiver(ussdResultReceiver)
+    private fun showManualTestDialog() {
+        val input = EditText(this)
+        input.hint = "Enter USSD (e.g. *133#)"
+        
+        AlertDialog.Builder(this)
+            .setTitle("Manual USSD Test")
+            .setView(input)
+            .setPositiveButton("Execute") { _, _ ->
+                val code = input.text.toString()
+                if (code.isNotEmpty()) {
+                    logToConsole("Manual Test: Executing $code")
+                    // نفترض أنها زين للاختبار، أو يمكن إضافة خيار للاختيار
+                    dialUSSD(code, "Zain") 
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun updateDeviceHealthUI(batteryPct: Float, tempC: Double) {
+        binding.txtBatteryLevel.text = "${batteryPct.toInt()}%"
+        binding.txtTempLevel.text = "${tempC}°C"
+
+        // تنبيه المدير في الحالات الحرجة (مرة كل 30 دقيقة لتجنب الإزعاج)
+        val currentTime = System.currentTimeMillis()
+        if (currentTime - lastAlertTime > 30 * 60 * 1000) {
+            if (tempC > 45.0 || batteryPct < 15.0) {
+                sendAdminAlert("CRITICAL HEALTH", "Battery: $batteryPct%, Temp: $tempC°C. Please check device immediately.")
+                lastAlertTime = currentTime
+            }
+        }
     }
 
     private fun startListeningForOrders() {
         db.collection("orders").whereEqualTo("status", "pending")
             .addSnapshotListener { snapshots, e ->
-                if (e != null) { return@addSnapshotListener }
+                if (e != null) return@addSnapshotListener
+                
+                // إذا كان وضع الصيانة مفعلاً، نتجاهل الطلبات
+                if (isMaintenanceMode) return@addSnapshotListener
 
                 if (snapshots != null && !snapshots.isEmpty) {
                     for (doc in snapshots.documentChanges) {
@@ -120,13 +212,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun processNewOrder(order: Order) {
-        logToConsole("Processing Order: ${order.id}")
-        if (order.transferType.equals("direct", ignoreCase = true)) {
-             OrderManager.addOrder(order)
-             logToConsole("-> Direct Transfer detected.")
-        } else if (order.transferType.equals("card", ignoreCase = true)) {
-            logToConsole("-> Card Recharge detected...")
+        logToConsole("Received Credit Order: ${order.id}")
+        if (order.transferType.equals("card", ignoreCase = true)) {
             analyzeAndExecuteCard(order)
+        } else {
+             // تعامل مع الأنواع الأخرى
+             logToConsole("Order type ${order.transferType} not supported for auto-credit.")
         }
     }
 
@@ -144,12 +235,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (providerName == "Unknown") {
-            handleFailedOrder(order, "صيغة الكود غير معروفة")
+            handleFailedOrder(order, "كود غير معروف (ليس زين أو آسيا)")
             return
         }
 
         currentCardOrder = order
-        logToConsole("Detected: $providerName. Dialing...")
+        logToConsole("Provider: $providerName. Redeeming Credit...")
         dialUSSD(ussdCode, providerName)
     }
 
@@ -180,8 +271,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleUSSDResult(status: String, ussdResponse: String) {
-        if (currentCardOrder == null) return
-        logToConsole("USSD Result: $status")
+        logToConsole("USSD Response: $status - $ussdResponse")
+        
+        // إذا كان اختباراً يدوياً (بدون طلب)
+        if (currentCardOrder == null) {
+            logToConsole("Manual Test Result: $ussdResponse")
+            return
+        }
 
         if (status == "SUCCESS") {
             handleSuccessOrder(currentCardOrder!!, ussdResponse)
@@ -192,53 +288,83 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleSuccessOrder(order: Order, message: String) {
-        // تحديث العداد
         successCounter++
         binding.txtSuccessCount.text = successCounter.toString()
         
-        logToConsole("Order SUCCESS! Notifying Admin...")
+        logToConsole("CREDIT REDEEMED! Notifying Admin for Transfer...")
+        
+        // تحديث حالة الطلب
         db.collection("orders").document(order.id)
             .update(mapOf("status" to "waiting_admin_confirmation", "ussdResponse" to message))
 
-        val adminNotification = hashMapOf(
-            "orderId" to order.id,
-            "type" to "card_recharge_success",
-            "message" to "تم شحن الكارت بنجاح. المبلغ: ${order.amount}",
-            "userPhone" to order.userPhone,
-            "amount" to order.amount,
-            "timestamp" to FieldValue.serverTimestamp(),
-            "status" to "unread"
-        )
-        db.collection("admin_notifications").add(adminNotification)
+        // إشعار المدير
+        sendAdminAlert("new_order", "تم استلام رصيد بقيمة ${order.amount}. يرجى تحويل الأموال للمستخدم.")
     }
 
     private fun handleFailedOrder(order: Order, reason: String) {
-        // تحديث العداد
         failedCounter++
         binding.txtFailedCount.text = failedCounter.toString()
         
-        logToConsole("Order FAILED! Updating User...")
+        logToConsole("Redeem Failed: $reason")
         db.collection("orders").document(order.id)
             .update(mapOf("status" to "failed", "failureReason" to reason))
+    }
+
+    private fun sendAdminAlert(type: String, message: String) {
+        val notification = hashMapOf(
+            "type" to type,
+            "message" to message,
+            "timestamp" to FieldValue.serverTimestamp(),
+            "status" to "unread"
+        )
+        db.collection("admin_notifications").add(notification)
+            .addOnFailureListener { e -> logToConsole("Failed to alert admin: ${e.message}") }
+    }
+    
+    // دالة لحفظ السجلات محلياً
+    private fun saveLogsToFile() {
+        try {
+            val fileName = "logs_${System.currentTimeMillis()}.txt"
+            val file = File(getExternalFilesDir(null), fileName)
+            val writer = FileWriter(file)
+            writer.append(binding.txtConsole.text)
+            writer.flush()
+            writer.close()
+            Toast.makeText(this, "Logs saved to: ${file.absolutePath}", Toast.LENGTH_LONG).show()
+            logToConsole("Logs exported successfully.")
+        } catch (e: Exception) {
+            logToConsole("Failed to export logs: ${e.message}")
+        }
     }
 
     fun logToConsole(message: String) {
         val currentTime = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
         runOnUiThread {
+            // نمسح السجل إذا أصبح طويلاً جداً لتوفير الذاكرة
+            if (binding.txtConsole.text.length > 5000) {
+                binding.txtConsole.text = "> Clearing old logs...\n"
+            }
             binding.txtConsole.append("\n[$currentTime] $message")
             binding.scrollView.post { binding.scrollView.fullScroll(android.view.View.FOCUS_DOWN) }
         }
     }
     
+    private fun startPulseAnimation() {
+        val scaleX = PropertyValuesHolder.ofFloat(View.SCALE_X, 1.2f)
+        val scaleY = PropertyValuesHolder.ofFloat(View.SCALE_Y, 1.2f)
+        val animator = ObjectAnimator.ofPropertyValuesHolder(binding.imgServerStatus, scaleX, scaleY)
+        animator.repeatCount = ObjectAnimator.INFINITE
+        animator.repeatMode = ObjectAnimator.REVERSE
+        animator.duration = 1000
+        animator.start()
+    }
+    
     private fun updateServerStatus(isOnline: Boolean) {
-        val text = if(isOnline) "ONLINE" else "OFFLINE"
         val color = if(isOnline) R.color.status_online else R.color.status_offline
-        binding.txtServerStatus.text = text
-        binding.txtServerStatus.setTextColor(ContextCompat.getColor(this, color))
         binding.imgServerStatus.setColorFilter(ContextCompat.getColor(this, color))
     }
     
-    // ... (دوال الصلاحيات و getPhoneAccountHandle تبقى كما هي في الكود السابق) ...
+    // --- الدوال المساعدة (الصلاحيات + اختيار الشريحة) ---
     private fun checkAndRequestPermissions() {
         val requiredPermissions = arrayOf(
             Manifest.permission.RECEIVE_SMS, Manifest.permission.READ_SMS,
@@ -285,5 +411,11 @@ class MainActivity : AppCompatActivity() {
             }
         }
         return null
+    }
+    
+    override fun onDestroy() {
+        super.onDestroy()
+        unregisterReceiver(ussdResultReceiver)
+        unregisterReceiver(batteryReceiver)
     }
 }
