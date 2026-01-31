@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "764325356168",
+    "project_id": "raseedapp-b442e",
+    "storage_bucket": "raseedapp-b442e.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:764325356168:android:174288267004933c01753d",
+        "android_client_info": {
+          "package_name": "com.raseed.helper"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB0Q4mpMamvkjgw6yilg6YApKprf9zckvA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:764325356168:android:2f99bad52f9afa9201753d",
+        "android_client_info": {
+          "package_name": "com.raseed.raseedApp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB0Q4mpMamvkjgw6yilg6YApKprf9zckvA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
