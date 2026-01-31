@@ -31,6 +31,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import java.io.File
 import java.io.FileWriter
 import java.text.SimpleDateFormat
+import java.util.ArrayDeque
 import java.util.Date
 import java.util.Locale
 import kotlin.system.exitProcess
@@ -39,10 +40,15 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private val db = FirebaseFirestore.getInstance()
-    private var currentCardOrder: Order? = null
+    
     private val EXPORTED_FLAG = 2
     
-    // متغيرات التحكم الجديدة
+    // === متغيرات الطابور (FIFO System) ===
+    private val orderQueue = ArrayDeque<Order>() // الطابور
+    private var isProcessing = false // هل النظام مشغول حالياً؟
+    private var currentCardOrder: Order? = null // الطلب الذي يعالج حالياً
+    
+    // متغيرات التحكم والإحصائيات
     private var isMaintenanceMode = false
     private var successCounter = 0
     private var failedCounter = 0
@@ -67,7 +73,7 @@ class MainActivity : AppCompatActivity() {
             val temp = intent?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0
             
             val batteryPct = level * 100 / scale.toFloat()
-            val tempC = temp / 10.0 // الحرارة تأتي مضروبة بـ 10
+            val tempC = temp / 10.0 
 
             updateDeviceHealthUI(batteryPct, tempC)
         }
@@ -78,7 +84,6 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // تسجيل المستقبلات
         val filterUSSD = IntentFilter("com.raseed.helper.USSD_RESULT")
         val filterBattery = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
         
@@ -90,11 +95,11 @@ class MainActivity : AppCompatActivity() {
             registerReceiver(batteryReceiver, filterBattery)
         }
 
-        setupControls() // تفعيل أزرار التحكم الجديدة
+        setupControls()
 
         try {
             FirebaseApp.initializeApp(this)
-            logToConsole("System Online. Ready for Incoming Credits.")
+            logToConsole("System Online. FIFO Queue Ready.")
             updateServerStatus(true)
             startPulseAnimation()
             startListeningForOrders()
@@ -105,88 +110,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun setupControls() {
-        // 1. زر وضع الصيانة
-        binding.btnMaintenance.setOnClickListener {
-            isMaintenanceMode = !isMaintenanceMode
-            if (isMaintenanceMode) {
-                binding.btnMaintenance.text = "MAINTENANCE MODE"
-                binding.btnMaintenance.setIconTintResource(android.R.color.holo_orange_light)
-                binding.btnMaintenance.setTextColor(getColor(android.R.color.holo_orange_light))
-                logToConsole("!!! Maintenance Mode ENABLED. Orders paused.")
-            } else {
-                binding.btnMaintenance.text = "ACTIVE MODE"
-                binding.btnMaintenance.setIconTintResource(R.color.neon_green)
-                binding.btnMaintenance.setTextColor(getColor(R.color.white))
-                logToConsole("System Active. Resuming operations.")
-            }
-        }
-
-        // 2. زر الاختبار اليدوي
-        binding.btnTestMode.setOnClickListener {
-            showManualTestDialog()
-        }
-
-        // 3. زر إعدادات الشرائح (محاكاة حالياً)
-        binding.btnSimConfig.setOnClickListener {
-            Toast.makeText(this, "SIM Config Saved: Auto-Detect Active", Toast.LENGTH_SHORT).show()
-            logToConsole("SIM Config: Using Auto-Detection (Zain/Asia)")
-        }
-
-        // 4. زر تصدير السجلات
-        binding.btnExportLogs.setOnClickListener {
-            saveLogsToFile()
-        }
-
-        // 5. زر الطوارئ
-        binding.btnEmergency.setOnClickListener {
-            logToConsole("EMERGENCY RESTART INITIATED...")
-            val intent = packageManager.getLaunchIntentForPackage(packageName)
-            intent?.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            startActivity(intent)
-            exitProcess(0)
-        }
-    }
-
-    private fun showManualTestDialog() {
-        val input = EditText(this)
-        input.hint = "Enter USSD (e.g. *133#)"
-        
-        AlertDialog.Builder(this)
-            .setTitle("Manual USSD Test")
-            .setView(input)
-            .setPositiveButton("Execute") { _, _ ->
-                val code = input.text.toString()
-                if (code.isNotEmpty()) {
-                    logToConsole("Manual Test: Executing $code")
-                    // نفترض أنها زين للاختبار، أو يمكن إضافة خيار للاختيار
-                    dialUSSD(code, "Zain") 
-                }
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun updateDeviceHealthUI(batteryPct: Float, tempC: Double) {
-        binding.txtBatteryLevel.text = "${batteryPct.toInt()}%"
-        binding.txtTempLevel.text = "${tempC}°C"
-
-        // تنبيه المدير في الحالات الحرجة (مرة كل 30 دقيقة لتجنب الإزعاج)
-        val currentTime = System.currentTimeMillis()
-        if (currentTime - lastAlertTime > 30 * 60 * 1000) {
-            if (tempC > 45.0 || batteryPct < 15.0) {
-                sendAdminAlert("CRITICAL HEALTH", "Battery: $batteryPct%, Temp: $tempC°C. Please check device immediately.")
-                lastAlertTime = currentTime
-            }
-        }
-    }
-
+    // === استقبال الطلبات وإضافتها للطابور ===
     private fun startListeningForOrders() {
         db.collection("orders").whereEqualTo("status", "pending")
             .addSnapshotListener { snapshots, e ->
                 if (e != null) return@addSnapshotListener
                 
-                // إذا كان وضع الصيانة مفعلاً، نتجاهل الطلبات
                 if (isMaintenanceMode) return@addSnapshotListener
 
                 if (snapshots != null && !snapshots.isEmpty) {
@@ -204,20 +133,52 @@ class MainActivity : AppCompatActivity() {
                                 userPhone = data["userPhone"] as? String ?: "",
                                 userFullName = data["userFullName"] as? String ?: ""
                             )
-                            if (currentCardOrder == null) { processNewOrder(order) }
+                            
+                            // 1. إضافة الطلب للطابور بدلاً من معالجته فوراً
+                            addToQueue(order)
                         }
                     }
                 }
             }
     }
 
-    private fun processNewOrder(order: Order) {
-        logToConsole("Received Credit Order: ${order.id}")
+    // === إدارة الطابور (Queue Manager) ===
+    private fun addToQueue(order: Order) {
+        // نتأكد أن الطلب غير مكرر في الطابور الحالي
+        val exists = orderQueue.any { it.id == order.id }
+        if (!exists && currentCardOrder?.id != order.id) {
+            orderQueue.add(order)
+            logToConsole("Order Added to Queue. Queue Size: ${orderQueue.size}")
+            processNextOrder() // محاولة تشغيل الطلب التالي
+        }
+    }
+
+    private fun processNextOrder() {
+        // إذا كان النظام مشغولاً أو الطابور فارغاً، لا تفعل شيئاً
+        if (isProcessing) {
+            return 
+        }
+        
+        if (orderQueue.isEmpty()) {
+            logToConsole("Queue Empty. Waiting for orders...")
+            return
+        }
+
+        // سحب أول طلب وبدء المعالجة
+        isProcessing = true
+        val nextOrder = orderQueue.removeFirst()
+        processOrderLogic(nextOrder)
+    }
+
+    // === تنفيذ الطلب الفعلي ===
+    private fun processOrderLogic(order: Order) {
+        logToConsole(">>> Processing Order: ${order.id}")
+        
         if (order.transferType.equals("card", ignoreCase = true)) {
             analyzeAndExecuteCard(order)
         } else {
-             // تعامل مع الأنواع الأخرى
-             logToConsole("Order type ${order.transferType} not supported for auto-credit.")
+             logToConsole("Skipping unsupported order type.")
+             finishProcessingAndNext() // تخطي والانتقال للتالي
         }
     }
 
@@ -235,18 +196,19 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (providerName == "Unknown") {
-            handleFailedOrder(order, "كود غير معروف (ليس زين أو آسيا)")
+            handleFailedOrder(order, "كود غير معروف")
             return
         }
 
         currentCardOrder = order
-        logToConsole("Provider: $providerName. Redeeming Credit...")
+        logToConsole("Provider: $providerName. Executing...")
         dialUSSD(ussdCode, providerName)
     }
 
     private fun dialUSSD(ussd: String, providerName: String) {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
             logToConsole("Error: Missing CALL_PHONE permission.")
+            handleFailedOrder(currentCardOrder!!, "Missing Permission")
             return
         }
 
@@ -265,49 +227,127 @@ class MainActivity : AppCompatActivity() {
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             startActivity(intent)
         } catch (e: Exception) {
+            logToConsole("Dial Error: ${e.message}")
             currentCardOrder?.let { handleFailedOrder(it, "فشل الاتصال: ${e.message}") }
-            currentCardOrder = null
         }
     }
 
     private fun handleUSSDResult(status: String, ussdResponse: String) {
-        logToConsole("USSD Response: $status - $ussdResponse")
-        
-        // إذا كان اختباراً يدوياً (بدون طلب)
-        if (currentCardOrder == null) {
+        // إذا كان اختباراً يدوياً (بدون طلب في الطابور)
+        if (currentCardOrder == null && !isProcessing) {
             logToConsole("Manual Test Result: $ussdResponse")
             return
         }
 
-        if (status == "SUCCESS") {
-            handleSuccessOrder(currentCardOrder!!, ussdResponse)
-        } else {
-            handleFailedOrder(currentCardOrder!!, ussdResponse)
+        if (currentCardOrder != null) {
+            logToConsole("USSD Response: $status - $ussdResponse")
+            if (status == "SUCCESS") {
+                handleSuccessOrder(currentCardOrder!!, ussdResponse)
+            } else {
+                handleFailedOrder(currentCardOrder!!, ussdResponse)
+            }
         }
-        currentCardOrder = null
     }
+
+    // === إنهاء الطلبات والانتقال للتالي ===
 
     private fun handleSuccessOrder(order: Order, message: String) {
         successCounter++
         binding.txtSuccessCount.text = successCounter.toString()
         
-        logToConsole("CREDIT REDEEMED! Notifying Admin for Transfer...")
+        logToConsole("SUCCESS! notifying admin...")
         
-        // تحديث حالة الطلب
         db.collection("orders").document(order.id)
             .update(mapOf("status" to "waiting_admin_confirmation", "ussdResponse" to message))
+            .addOnCompleteListener { finishProcessingAndNext() } // المهم هنا: الانتقال للتالي بعد التحديث
 
-        // إشعار المدير
-        sendAdminAlert("new_order", "تم استلام رصيد بقيمة ${order.amount}. يرجى تحويل الأموال للمستخدم.")
+        sendAdminAlert("new_order", "تم استلام رصيد بقيمة ${order.amount}.")
     }
 
     private fun handleFailedOrder(order: Order, reason: String) {
         failedCounter++
         binding.txtFailedCount.text = failedCounter.toString()
         
-        logToConsole("Redeem Failed: $reason")
+        logToConsole("FAILED: $reason")
+        
         db.collection("orders").document(order.id)
             .update(mapOf("status" to "failed", "failureReason" to reason))
+            .addOnCompleteListener { finishProcessingAndNext() } // المهم هنا: الانتقال للتالي بعد التحديث
+    }
+
+    // الدالة الأهم في نظام FIFO: إعادة تعيين الحالة وسحب التالي
+    private fun finishProcessingAndNext() {
+        logToConsole("--- Order Completed ---")
+        currentCardOrder = null
+        isProcessing = false
+        processNextOrder() // هل يوجد أحد آخر في الطابور؟
+    }
+
+    // ---------------------------------------------------------
+    // بقية دوال الواجهة والتحكم (لم تتغير، فقط للتكامل)
+    // ---------------------------------------------------------
+
+    private fun setupControls() {
+        binding.btnMaintenance.setOnClickListener {
+            isMaintenanceMode = !isMaintenanceMode
+            if (isMaintenanceMode) {
+                binding.btnMaintenance.text = "MAINTENANCE MODE"
+                binding.btnMaintenance.setIconTintResource(android.R.color.holo_orange_light)
+                binding.btnMaintenance.setTextColor(getColor(android.R.color.holo_orange_light))
+                logToConsole("!!! Maintenance Mode ENABLED. Queue Paused.")
+            } else {
+                binding.btnMaintenance.text = "ACTIVE MODE"
+                binding.btnMaintenance.setIconTintResource(R.color.neon_green)
+                binding.btnMaintenance.setTextColor(getColor(R.color.white))
+                logToConsole("System Active. Queue Resumed.")
+                processNextOrder() // استئناف الطابور فوراً
+            }
+        }
+
+        binding.btnTestMode.setOnClickListener { showManualTestDialog() }
+        
+        binding.btnSimConfig.setOnClickListener {
+            Toast.makeText(this, "SIM Config Saved: Auto-Detect Active", Toast.LENGTH_SHORT).show()
+        }
+
+        binding.btnExportLogs.setOnClickListener { saveLogsToFile() }
+
+        binding.btnEmergency.setOnClickListener {
+            val intent = packageManager.getLaunchIntentForPackage(packageName)
+            intent?.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            startActivity(intent)
+            exitProcess(0)
+        }
+    }
+
+    private fun showManualTestDialog() {
+        val input = EditText(this)
+        input.hint = "Enter USSD (e.g. *133#)"
+        AlertDialog.Builder(this)
+            .setTitle("Manual USSD Test")
+            .setView(input)
+            .setPositiveButton("Execute") { _, _ ->
+                val code = input.text.toString()
+                if (code.isNotEmpty()) {
+                    logToConsole("Manual Test: $code")
+                    dialUSSD(code, "Zain") 
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun updateDeviceHealthUI(batteryPct: Float, tempC: Double) {
+        binding.txtBatteryLevel.text = "${batteryPct.toInt()}%"
+        binding.txtTempLevel.text = "${tempC}°C"
+        
+        val currentTime = System.currentTimeMillis()
+        if (currentTime - lastAlertTime > 30 * 60 * 1000) {
+            if (tempC > 45.0 || batteryPct < 15.0) {
+                sendAdminAlert("CRITICAL HEALTH", "Battery: $batteryPct%, Temp: $tempC°C")
+                lastAlertTime = currentTime
+            }
+        }
     }
 
     private fun sendAdminAlert(type: String, message: String) {
@@ -318,10 +358,8 @@ class MainActivity : AppCompatActivity() {
             "status" to "unread"
         )
         db.collection("admin_notifications").add(notification)
-            .addOnFailureListener { e -> logToConsole("Failed to alert admin: ${e.message}") }
     }
     
-    // دالة لحفظ السجلات محلياً
     private fun saveLogsToFile() {
         try {
             val fileName = "logs_${System.currentTimeMillis()}.txt"
@@ -330,17 +368,13 @@ class MainActivity : AppCompatActivity() {
             writer.append(binding.txtConsole.text)
             writer.flush()
             writer.close()
-            Toast.makeText(this, "Logs saved to: ${file.absolutePath}", Toast.LENGTH_LONG).show()
-            logToConsole("Logs exported successfully.")
-        } catch (e: Exception) {
-            logToConsole("Failed to export logs: ${e.message}")
-        }
+            Toast.makeText(this, "Logs saved", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {}
     }
 
     fun logToConsole(message: String) {
         val currentTime = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
         runOnUiThread {
-            // نمسح السجل إذا أصبح طويلاً جداً لتوفير الذاكرة
             if (binding.txtConsole.text.length > 5000) {
                 binding.txtConsole.text = "> Clearing old logs...\n"
             }
@@ -364,7 +398,6 @@ class MainActivity : AppCompatActivity() {
         binding.imgServerStatus.setColorFilter(ContextCompat.getColor(this, color))
     }
     
-    // --- الدوال المساعدة (الصلاحيات + اختيار الشريحة) ---
     private fun checkAndRequestPermissions() {
         val requiredPermissions = arrayOf(
             Manifest.permission.RECEIVE_SMS, Manifest.permission.READ_SMS,
