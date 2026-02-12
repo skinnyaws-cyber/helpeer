@@ -5,8 +5,9 @@ import android.content.Context
 import android.content.Intent
 import android.provider.Telephony
 import android.util.Log
-import com.google.firebase.firestore.FirebaseFirestore
-import com.google.firebase.firestore.FieldValue
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import java.util.regex.Pattern
 
 class SmsReceiver : BroadcastReceiver() {
@@ -14,22 +15,27 @@ class SmsReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action == Telephony.Sms.Intents.SMS_RECEIVED_ACTION) {
             val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent)
-            for (sms in messages) {
-                val sender = sms.originatingAddress ?: ""
-                val body = sms.messageBody ?: ""
-                Log.d("SmsReceiver", "SMS: $sender, Body: $body")
+            
+            // نستخدم Coroutine لنشر الرسالة دون تعطيل النظام
+            CoroutineScope(Dispatchers.IO).launch {
+                for (sms in messages) {
+                    val sender = sms.originatingAddress ?: ""
+                    val body = sms.messageBody ?: ""
+                    Log.d("SmsReceiver", "SMS Received from $sender: $body")
 
-                if (sender.contains("Asiacell", ignoreCase = true)) {
-                    analyzeAsiacellSms(context, body)
-                } else if (sender.contains("Zain", ignoreCase = true) || sender.contains("IQ", ignoreCase = true)) {
-                    analyzeZainSms(context, body)
+                    if (sender.contains("Asiacell", ignoreCase = true)) {
+                        analyzeAsiacellSms(body)
+                    } else if (sender.contains("Zain", ignoreCase = true) || sender.contains("IQ", ignoreCase = true)) {
+                        analyzeZainSms(body)
+                    }
                 }
             }
         }
     }
 
-    private fun analyzeAsiacellSms(context: Context, body: String) {
+    private suspend fun analyzeAsiacellSms(body: String) {
         try {
+            // الصيغة: لقد إستلمت 5,000 د من الرقم 7714097343
             val amountMatcher = Pattern.compile("إستلمت\\s*([\\d,،]+)").matcher(body)
             val phoneMatcher = Pattern.compile("من الرقم\\s*(\\d+)").matcher(body)
 
@@ -41,7 +47,8 @@ class SmsReceiver : BroadcastReceiver() {
                 val phone = convertArabicNumbers(rawPhone)
 
                 if (amount > 0) {
-                    checkMatch(context, amount, phone, "Asiacell")
+                    // "الصراخ" في المايكروفون ليسمع المساعدون
+                    OrderManager.broadcastSmsArrival(amount, phone, "Asiacell")
                 }
             }
         } catch (e: Exception) {
@@ -49,10 +56,12 @@ class SmsReceiver : BroadcastReceiver() {
         }
     }
 
-    private fun analyzeZainSms(context: Context, body: String) {
+    private suspend fun analyzeZainSms(body: String) {
         try {
-            val amountMatcher = Pattern.compile("بتحويل\\s*([\\d,،]+)").matcher(body)
+            // الصيغة: المشترك 7829390195قام بتحويل 1000دينار
+            // ملاحظة: \s* تعني (مسافة أو بدون مسافة) وهذا يحل مشكلة التصاق الرقم بكلمة "قام"
             val phoneMatcher = Pattern.compile("المشترك\\s*(\\d+)").matcher(body)
+            val amountMatcher = Pattern.compile("بتحويل\\s*([\\d,،]+)").matcher(body)
 
             if (amountMatcher.find() && phoneMatcher.find()) {
                 val rawAmount = amountMatcher.group(1) ?: "0"
@@ -62,7 +71,8 @@ class SmsReceiver : BroadcastReceiver() {
                 val phone = convertArabicNumbers(rawPhone)
 
                 if (amount > 0) {
-                    checkMatch(context, amount, phone, "Zain")
+                    // "الصراخ" في المايكروفون ليسمع المساعدون
+                    OrderManager.broadcastSmsArrival(amount, phone, "Zain")
                 }
             }
         } catch (e: Exception) {
@@ -79,33 +89,5 @@ class SmsReceiver : BroadcastReceiver() {
     private fun convertArabicNumbers(str: String): String {
         return str.replace("٠", "0").replace("١", "1").replace("٢", "2").replace("٣", "3").replace("٤", "4")
                   .replace("٥", "5").replace("٦", "6").replace("٧", "7").replace("٨", "8").replace("٩", "9")
-    }
-
-    private fun checkMatch(context: Context, amount: Double, phone: String, provider: String) {
-        val matchingOrder = OrderManager.findMatchingOrder(amount, phone, provider)
-        if (matchingOrder != null) {
-            Log.i("SmsReceiver", "MATCH FOUND: ${matchingOrder.id}")
-            
-            val db = FirebaseFirestore.getInstance()
-            val data = hashMapOf(
-                "orderId" to matchingOrder.id,
-                "type" to "confirmation_request",
-                "status" to "waiting_admin_approval",
-                "message" to "تم استلام رصيد ${matchingOrder.amount} من ${matchingOrder.userPhone}",
-                "amountReceived" to matchingOrder.amount,
-                "senderPhone" to matchingOrder.userPhone,
-                "userFullName" to matchingOrder.userFullName,
-                "targetCard" to matchingOrder.receivingCard,
-                "timestamp" to FieldValue.serverTimestamp()
-            )
-            
-            db.collection("admin_notifications").add(data)
-                .addOnSuccessListener { 
-                    OrderManager.removeOrder(matchingOrder.id)
-                }
-                .addOnFailureListener { e ->
-                    Log.e("SmsReceiver", "Failed to send notification: ${e.message}")
-                }
-        }
     }
 }
