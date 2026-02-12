@@ -150,7 +150,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"
         android:columnCount="2"
-        android:rowCount="3"
+        android:rowCount="4" 
         android:alignmentMode="alignMargins"
         app:layout_constraintTop_toBottomOf="@+id/layoutStats">
 
@@ -169,18 +169,18 @@
             app:iconTint="@color/neon_green" />
 
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnTestMode"
+            android:id="@+id/btnPermissions"
             android:layout_width="0dp"
             android:layout_height="55dp"
             android:layout_columnWeight="1"
             android:layout_margin="4dp"
-            android:text="MANUAL TEST"
+            android:text="PERMISSIONS"
             android:textSize="11sp"
-            android:textColor="@color/text_hint"
+            android:textColor="@color/white"
             app:backgroundTint="@color/bg_panel"
             app:cornerRadius="8dp"
-            app:icon="@android:drawable/ic_menu_search"
-            app:iconTint="@color/white" />
+            app:icon="@android:drawable/ic_menu_manage"
+            app:iconTint="@color/text_hint" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btnSimConfig"
@@ -197,12 +197,27 @@
             app:iconTint="@color/white" />
 
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnExportLogs"
+            android:id="@+id/btnTestMode"
             android:layout_width="0dp"
             android:layout_height="55dp"
             android:layout_columnWeight="1"
             android:layout_margin="4dp"
-            android:text="EXPORT LOGS"
+            android:text="MANUAL TEST"
+            android:textSize="11sp"
+            android:textColor="@color/text_hint"
+            app:backgroundTint="@color/bg_panel"
+            app:cornerRadius="8dp"
+            app:icon="@android:drawable/ic_menu_search"
+            app:iconTint="@color/white" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnExportLogs"
+            android:layout_width="0dp"
+            android:layout_height="55dp"
+            android:layout_columnSpan="2" 
+            android:layout_columnWeight="1"
+            android:layout_margin="4dp"
+            android:text="EXPORT SYSTEM LOGS"
             android:textSize="11sp"
             android:textColor="@color/text_hint"
             app:backgroundTint="@color/bg_panel"
