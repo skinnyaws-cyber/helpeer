@@ -8,16 +8,20 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.Typeface
 import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
-import android.telecom.PhoneAccountHandle
-import android.telecom.TelecomManager
-import android.telephony.SubscriptionManager
+import android.view.Gravity
 import android.view.View
-import android.widget.EditText
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -25,13 +29,11 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.raseed.helper.databinding.ActivityMainBinding
 import com.google.firebase.FirebaseApp
-import com.google.firebase.firestore.DocumentChange
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import java.io.File
 import java.io.FileWriter
 import java.text.SimpleDateFormat
-import java.util.ArrayDeque
 import java.util.Date
 import java.util.Locale
 import kotlin.system.exitProcess
@@ -43,24 +45,17 @@ class MainActivity : AppCompatActivity() {
     
     private val EXPORTED_FLAG = 2
     
-    // === متغيرات الطابور (FIFO System) ===
-    private val orderQueue = ArrayDeque<Order>() // الطابور
-    private var isProcessing = false // هل النظام مشغول حالياً؟
-    private var currentCardOrder: Order? = null // الطلب الذي يعالج حالياً
-    
     // متغيرات التحكم والإحصائيات
     private var isMaintenanceMode = false
-    private var successCounter = 0
-    private var failedCounter = 0
     private var lastAlertTime = 0L
 
-    // مستقبل نتائج USSD
+    // مستقبل نتائج USSD (تم الإبقاء عليه لهيكل النظام لكنه غير مستخدم في المنطق الجديد حالياً)
     private val ussdResultReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == "com.raseed.helper.USSD_RESULT") {
                 val status = intent.getStringExtra("status") ?: "UNKNOWN"
                 val message = intent.getStringExtra("message") ?: ""
-                handleUSSDResult(status, message)
+                logToConsole("USSD Event: $status - $message")
             }
         }
     }
@@ -99,243 +94,194 @@ class MainActivity : AppCompatActivity() {
 
         try {
             FirebaseApp.initializeApp(this)
-            logToConsole("System Online. FIFO Queue Ready.")
+            logToConsole("System Online. Assistants Mode Ready.")
             updateServerStatus(true)
             startPulseAnimation()
-            startListeningForOrders()
-            checkAndRequestPermissions()
+            
+            // --- تفعيل النظام الجديد (المساعدين) ---
+            // لا نحتاج لمؤقت هنا، المساعدون يديرون وقتهم ذاتياً
+            OrderManager.startMonitoring()
+            
+            // التحقق السريع عند البدء
+            checkPermissionsOnStart()
+            
         } catch (e: Exception) {
             logToConsole("Init Failed: ${e.message}")
             updateServerStatus(false)
         }
     }
 
-    // === استقبال الطلبات وإضافتها للطابور ===
-    private fun startListeningForOrders() {
-        db.collection("orders").whereEqualTo("status", "pending")
-            .addSnapshotListener { snapshots, e ->
-                if (e != null) return@addSnapshotListener
-                
-                if (isMaintenanceMode) return@addSnapshotListener
-
-                if (snapshots != null && !snapshots.isEmpty) {
-                    for (doc in snapshots.documentChanges) {
-                        if (doc.type == DocumentChange.Type.ADDED) {
-                            val data = doc.document.data
-                            val order = Order(
-                                id = doc.document.id,
-                                amount = (data["amount"] as? Number)?.toDouble() ?: 0.0,
-                                commission = (data["commission"] as? Number)?.toDouble() ?: 0.0,
-                                telecomProvider = data["telecomProvider"] as? String ?: "",
-                                transferType = data["transferType"] as? String ?: "",
-                                targetInfo = data["targetInfo"] as? String ?: "",
-                                status = data["status"] as? String ?: "",
-                                userPhone = data["userPhone"] as? String ?: "",
-                                userFullName = data["userFullName"] as? String ?: ""
-                            )
-                            
-                            // 1. إضافة الطلب للطابور بدلاً من معالجته فوراً
-                            addToQueue(order)
-                        }
-                    }
-                }
-            }
-    }
-
-    // === إدارة الطابور (Queue Manager) ===
-    private fun addToQueue(order: Order) {
-        // نتأكد أن الطلب غير مكرر في الطابور الحالي
-        val exists = orderQueue.any { it.id == order.id }
-        if (!exists && currentCardOrder?.id != order.id) {
-            orderQueue.add(order)
-            logToConsole("Order Added to Queue. Queue Size: ${orderQueue.size}")
-            processNextOrder() // محاولة تشغيل الطلب التالي
-        }
-    }
-
-    private fun processNextOrder() {
-        // إذا كان النظام مشغولاً أو الطابور فارغاً، لا تفعل شيئاً
-        if (isProcessing) {
-            return 
-        }
-        
-        if (orderQueue.isEmpty()) {
-            logToConsole("Queue Empty. Waiting for orders...")
-            return
-        }
-
-        // سحب أول طلب وبدء المعالجة
-        isProcessing = true
-        val nextOrder = orderQueue.removeFirst()
-        processOrderLogic(nextOrder)
-    }
-
-    // === تنفيذ الطلب الفعلي ===
-    private fun processOrderLogic(order: Order) {
-        logToConsole(">>> Processing Order: ${order.id}")
-        
-        if (order.transferType.equals("card", ignoreCase = true)) {
-            analyzeAndExecuteCard(order)
-        } else {
-             logToConsole("Skipping unsupported order type.")
-             finishProcessingAndNext() // تخطي والانتقال للتالي
-        }
-    }
-
-    private fun analyzeAndExecuteCard(order: Order) {
-        val ussdCode = order.targetInfo.trim()
-        if (ussdCode.isEmpty()) {
-            handleFailedOrder(order, "كود التعبئة فارغ")
-            return
-        }
-
-        val providerName = when {
-            ussdCode.startsWith("*133*") -> "Asiacell"
-            ussdCode.startsWith("*101") -> "Zain"
-            else -> "Unknown"
-        }
-
-        if (providerName == "Unknown") {
-            handleFailedOrder(order, "كود غير معروف")
-            return
-        }
-
-        currentCardOrder = order
-        logToConsole("Provider: $providerName. Executing...")
-        dialUSSD(ussdCode, providerName)
-    }
-
-    private fun dialUSSD(ussd: String, providerName: String) {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
-            logToConsole("Error: Missing CALL_PHONE permission.")
-            handleFailedOrder(currentCardOrder!!, "Missing Permission")
-            return
-        }
-
-        try {
-            val encodedUssd = ussd.replace("#", "%23")
-            val uri = Uri.parse("tel:$encodedUssd")
-            val intent = Intent(Intent.ACTION_CALL, uri)
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                val targetPhoneAccount = getPhoneAccountHandle(providerName)
-                if (targetPhoneAccount != null) {
-                    intent.putExtra(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, targetPhoneAccount)
-                }
-            }
-
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            startActivity(intent)
-        } catch (e: Exception) {
-            logToConsole("Dial Error: ${e.message}")
-            currentCardOrder?.let { handleFailedOrder(it, "فشل الاتصال: ${e.message}") }
-        }
-    }
-
-    private fun handleUSSDResult(status: String, ussdResponse: String) {
-        // إذا كان اختباراً يدوياً (بدون طلب في الطابور)
-        if (currentCardOrder == null && !isProcessing) {
-            logToConsole("Manual Test Result: $ussdResponse")
-            return
-        }
-
-        if (currentCardOrder != null) {
-            logToConsole("USSD Response: $status - $ussdResponse")
-            if (status == "SUCCESS") {
-                handleSuccessOrder(currentCardOrder!!, ussdResponse)
-            } else {
-                handleFailedOrder(currentCardOrder!!, ussdResponse)
-            }
-        }
-    }
-
-    // === إنهاء الطلبات والانتقال للتالي ===
-
-    private fun handleSuccessOrder(order: Order, message: String) {
-        successCounter++
-        binding.txtSuccessCount.text = successCounter.toString()
-        
-        logToConsole("SUCCESS! notifying admin...")
-        
-        db.collection("orders").document(order.id)
-            .update(mapOf("status" to "waiting_admin_confirmation", "ussdResponse" to message))
-            .addOnCompleteListener { finishProcessingAndNext() } // المهم هنا: الانتقال للتالي بعد التحديث
-
-        sendAdminAlert("new_order", "تم استلام رصيد بقيمة ${order.amount}.")
-    }
-
-    private fun handleFailedOrder(order: Order, reason: String) {
-        failedCounter++
-        binding.txtFailedCount.text = failedCounter.toString()
-        
-        logToConsole("FAILED: $reason")
-        
-        db.collection("orders").document(order.id)
-            .update(mapOf("status" to "failed", "failureReason" to reason))
-            .addOnCompleteListener { finishProcessingAndNext() } // المهم هنا: الانتقال للتالي بعد التحديث
-    }
-
-    // الدالة الأهم في نظام FIFO: إعادة تعيين الحالة وسحب التالي
-    private fun finishProcessingAndNext() {
-        logToConsole("--- Order Completed ---")
-        currentCardOrder = null
-        isProcessing = false
-        processNextOrder() // هل يوجد أحد آخر في الطابور؟
-    }
-
     // ---------------------------------------------------------
-    // بقية دوال الواجهة والتحكم (لم تتغير، فقط للتكامل)
+    // دوال الواجهة والتحكم
     // ---------------------------------------------------------
 
     private fun setupControls() {
+        // زر الصيانة
         binding.btnMaintenance.setOnClickListener {
             isMaintenanceMode = !isMaintenanceMode
             if (isMaintenanceMode) {
                 binding.btnMaintenance.text = "MAINTENANCE MODE"
-                binding.btnMaintenance.setIconTintResource(android.R.color.holo_orange_light)
-                binding.btnMaintenance.setTextColor(getColor(android.R.color.holo_orange_light))
-                logToConsole("!!! Maintenance Mode ENABLED. Queue Paused.")
+                binding.btnMaintenance.setTextColor(Color.YELLOW)
+                logToConsole("!!! Maintenance Mode ENABLED.")
             } else {
                 binding.btnMaintenance.text = "ACTIVE MODE"
-                binding.btnMaintenance.setIconTintResource(R.color.neon_green)
-                binding.btnMaintenance.setTextColor(getColor(R.color.white))
-                logToConsole("System Active. Queue Resumed.")
-                processNextOrder() // استئناف الطابور فوراً
+                binding.btnMaintenance.setTextColor(Color.WHITE)
+                logToConsole("System Active.")
             }
         }
 
-        binding.btnTestMode.setOnClickListener { showManualTestDialog() }
-        
-        binding.btnSimConfig.setOnClickListener {
-            Toast.makeText(this, "SIM Config Saved: Auto-Detect Active", Toast.LENGTH_SHORT).show()
-        }
-
+        // زر التصدير
         binding.btnExportLogs.setOnClickListener { saveLogsToFile() }
 
+        // زر الطوارئ
         binding.btnEmergency.setOnClickListener {
             val intent = packageManager.getLaunchIntentForPackage(packageName)
             intent?.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
             startActivity(intent)
             exitProcess(0)
         }
+        
+        // --- الزر الجديد: إدارة الأذونات ---
+        // ملاحظة: تأكد من إضافة زر بهذا الاسم في ملف activity_main.xml
+        // android:id="@+id/btnPermissions"
+        // إذا لم يكن موجوداً، قم بإضافته أولاً ليعمل هذا الكود
+        binding.btnSimConfig.setOnClickListener { 
+            // قمت بربطه مؤقتاً بزر Config القديم، يمكنك تغيير الربط لزر جديد
+            showPermissionsDashboard() 
+        }
     }
 
-    private fun showManualTestDialog() {
-        val input = EditText(this)
-        input.hint = "Enter USSD (e.g. *133#)"
-        AlertDialog.Builder(this)
-            .setTitle("Manual USSD Test")
-            .setView(input)
-            .setPositiveButton("Execute") { _, _ ->
-                val code = input.text.toString()
-                if (code.isNotEmpty()) {
-                    logToConsole("Manual Test: $code")
-                    dialUSSD(code, "Zain") 
-                }
+    // === لوحة التحكم بالأذونات (Dashboard) ===
+    private fun showPermissionsDashboard() {
+        val scrollView = ScrollView(this)
+        val layout = LinearLayout(this)
+        layout.orientation = LinearLayout.VERTICAL
+        layout.setPadding(40, 40, 40, 40)
+        scrollView.addView(layout)
+
+        val title = TextView(this)
+        title.text = "Required Permissions Check"
+        title.textSize = 20f
+        title.setTypeface(null, Typeface.BOLD)
+        title.gravity = Gravity.CENTER
+        title.setPadding(0, 0, 0, 30)
+        layout.addView(title)
+
+        // 1. SMS Permission
+        val hasSms = ContextCompat.checkSelfPermission(this, Manifest.permission.RECEIVE_SMS) == PackageManager.PERMISSION_GRANTED &&
+                     ContextCompat.checkSelfPermission(this, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED
+        addPermissionRow(layout, "SMS Access (Receive/Read)", hasSms) {
+            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+            intent.data = Uri.fromParts("package", packageName, null)
+            startActivity(intent)
+        }
+
+        // 2. Battery Optimization (Background Work)
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        val isIgnoringBattery = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            pm.isIgnoringBatteryOptimizations(packageName)
+        } else true
+        addPermissionRow(layout, "Ignore Battery Opt (Keep Alive)", isIgnoringBattery) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                intent.data = Uri.parse("package:$packageName")
+                startActivity(intent)
             }
-            .setNegativeButton("Cancel", null)
+        }
+
+        // 3. Overlay Permission (For Alerts/USSD)
+        val hasOverlay = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Settings.canDrawOverlays(this) else true
+        addPermissionRow(layout, "Display Over Other Apps", hasOverlay) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
+                intent.data = Uri.parse("package:$packageName")
+                startActivity(intent)
+            }
+        }
+
+        // 4. Phone State (Reading SIM)
+        val hasPhone = ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED
+        addPermissionRow(layout, "Read Phone State (SIM)", hasPhone) {
+            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+            intent.data = Uri.fromParts("package", packageName, null)
+            startActivity(intent)
+        }
+        
+        // 5. Accessibility Service (Optional but good for USSD)
+        val hasAccess = isAccessibilityServiceEnabled()
+        addPermissionRow(layout, "Accessibility Service", hasAccess) {
+             val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+             startActivity(intent)
+        }
+
+        AlertDialog.Builder(this)
+            .setView(scrollView)
+            .setPositiveButton("Close", null)
             .show()
     }
+
+    private fun addPermissionRow(parent: LinearLayout, labelText: String, isGranted: Boolean, onEnable: () -> Unit) {
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.weightSum = 3f
+        row.setPadding(0, 15, 0, 15)
+
+        val label = TextView(this)
+        label.text = labelText
+        label.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2f)
+        label.textSize = 14f
+        row.addView(label)
+
+        val statusBtn = Button(this)
+        statusBtn.layoutParams = LinearLayout.LayoutParams(0, 100, 1f) // height fixed for consistency
+        statusBtn.textSize = 12f
+        
+        if (isGranted) {
+            statusBtn.text = "Disable" // المعنى: هو مفعل حالياً، اضغط للتعطيل (أو للعرض فقط)
+            statusBtn.setBackgroundColor(Color.parseColor("#4CAF50")) // Green
+            statusBtn.setTextColor(Color.WHITE)
+            statusBtn.isEnabled = false // لا حاجة للضغط إذا كان مفعلاً (أو يمكن تفعيله ليفتح الإعدادات أيضاً)
+        } else {
+            statusBtn.text = "Enable"
+            statusBtn.setBackgroundColor(Color.parseColor("#F44336")) // Red
+            statusBtn.setTextColor(Color.WHITE)
+            statusBtn.setOnClickListener { 
+                onEnable() 
+                Toast.makeText(this, "Please enable: $labelText", Toast.LENGTH_LONG).show()
+            }
+        }
+        
+        row.addView(statusBtn)
+        parent.addView(row)
+        
+        // فاصل خطي
+        val divider = View(this)
+        divider.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 2)
+        divider.setBackgroundColor(Color.LTGRAY)
+        
+        parent.addView(row)
+        parent.addView(divider)
+    }
+
+    private fun checkPermissionsOnStart() {
+        val requiredPermissions = arrayOf(
+            Manifest.permission.RECEIVE_SMS, Manifest.permission.READ_SMS,
+            Manifest.permission.READ_PHONE_STATE, Manifest.permission.CALL_PHONE
+        )
+        val missingPermissions = requiredPermissions.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missingPermissions.isNotEmpty()) {
+            ActivityCompat.requestPermissions(this, missingPermissions.toTypedArray(), 100)
+        }
+    }
+
+    private fun isAccessibilityServiceEnabled(): Boolean {
+        val prefString = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+        return prefString != null && prefString.contains(packageName)
+    }
+    
+    // === وظائف الصحة والتنبيهات (لم تتغير) ===
 
     private fun updateDeviceHealthUI(batteryPct: Float, tempC: Double) {
         binding.txtBatteryLevel.text = "${batteryPct.toInt()}%"
@@ -394,56 +340,14 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun updateServerStatus(isOnline: Boolean) {
-        val color = if(isOnline) R.color.status_online else R.color.status_offline
-        binding.imgServerStatus.setColorFilter(ContextCompat.getColor(this, color))
-    }
-    
-    private fun checkAndRequestPermissions() {
-        val requiredPermissions = arrayOf(
-            Manifest.permission.RECEIVE_SMS, Manifest.permission.READ_SMS,
-            Manifest.permission.READ_PHONE_STATE, Manifest.permission.CALL_PHONE
-        )
-        val missingPermissions = requiredPermissions.filter {
-            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        val color = if(isOnline) com.raseed.helper.R.color.neon_green else android.R.color.holo_red_dark
+        // ملاحظة: تأكد من أن أسماء الألوان تطابق ما في ملف الـ XML
+        // إذا كان لديك لون معرف باسم status_online استخدمه
+        try {
+             binding.imgServerStatus.setColorFilter(ContextCompat.getColor(this, color))
+        } catch (e: Exception) {
+             binding.imgServerStatus.setColorFilter(if(isOnline) Color.GREEN else Color.RED)
         }
-        if (missingPermissions.isNotEmpty()) {
-            ActivityCompat.requestPermissions(this, missingPermissions.toTypedArray(), 100)
-        }
-        if (!isAccessibilityServiceEnabled()) {
-             val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-             startActivity(intent)
-        }
-    }
-
-    private fun isAccessibilityServiceEnabled(): Boolean {
-        val prefString = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
-        return prefString != null && prefString.contains(packageName)
-    }
-    
-    private fun getPhoneAccountHandle(providerName: String): PhoneAccountHandle? {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            if (ActivityCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
-                return null
-            }
-            val telecomManager = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
-            val callCapableAccounts = telecomManager.callCapablePhoneAccounts
-            val subscriptionManager = getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
-            val activeSubs = subscriptionManager.activeSubscriptionInfoList
-            
-            for (handle in callCapableAccounts) {
-                for (sub in activeSubs) {
-                    if (sub.subscriptionId.toString() == handle.id || sub.iccId == handle.id) {
-                         val carrier = sub.carrierName.toString().lowercase()
-                         val display = sub.displayName.toString().lowercase()
-                         val target = providerName.lowercase()
-                         if (carrier.contains(target) || display.contains(target)) {
-                             return handle
-                         }
-                    }
-                }
-            }
-        }
-        return null
     }
     
     override fun onDestroy() {
