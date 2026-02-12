@@ -13,4 +13,5 @@ data class Order(
     val userFullName: String = "",
     val userId: String = "",
     val userPhone: String = ""
+    val timestamp: Timestamp? = null
 )
