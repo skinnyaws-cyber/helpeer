@@ -27,6 +27,8 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope // استيراد ضروري للكود الجديد
+import kotlinx.coroutines.launch // استيراد ضروري للكود الجديد
 import com.raseed.helper.databinding.ActivityMainBinding
 import com.google.firebase.FirebaseApp
 import com.google.firebase.firestore.FieldValue
@@ -92,6 +94,15 @@ class MainActivity : AppCompatActivity() {
 
         setupControls()
 
+        // --- التحديث الجديد: ربط التيرمنال بمدير الطلبات ---
+        // هذا الكود يستقبل النصوص من OrderManager ويطبعها على الشاشة
+        lifecycleScope.launch {
+            OrderManager.terminalFlow.collect { message ->
+                logToConsole(message)
+            }
+        }
+        // ---------------------------------------------------
+
         try {
             FirebaseApp.initializeApp(this)
             logToConsole("System Online. Assistants Mode Ready.")
@@ -99,7 +110,6 @@ class MainActivity : AppCompatActivity() {
             startPulseAnimation()
             
             // --- تفعيل النظام الجديد (المساعدين) ---
-            // لا نحتاج لمؤقت هنا، المساعدون يديرون وقتهم ذاتياً
             OrderManager.startMonitoring()
             
             // التحقق السريع عند البدء
@@ -142,11 +152,7 @@ class MainActivity : AppCompatActivity() {
         }
         
         // --- الزر الجديد: إدارة الأذونات ---
-        // ملاحظة: تأكد من إضافة زر بهذا الاسم في ملف activity_main.xml
-        // android:id="@+id/btnPermissions"
-        // إذا لم يكن موجوداً، قم بإضافته أولاً ليعمل هذا الكود
         binding.btnSimConfig.setOnClickListener { 
-            // قمت بربطه مؤقتاً بزر Config القديم، يمكنك تغيير الربط لزر جديد
             showPermissionsDashboard() 
         }
     }
@@ -237,10 +243,10 @@ class MainActivity : AppCompatActivity() {
         statusBtn.textSize = 12f
         
         if (isGranted) {
-            statusBtn.text = "Disable" // المعنى: هو مفعل حالياً، اضغط للتعطيل (أو للعرض فقط)
+            statusBtn.text = "Disable" 
             statusBtn.setBackgroundColor(Color.parseColor("#4CAF50")) // Green
             statusBtn.setTextColor(Color.WHITE)
-            statusBtn.isEnabled = false // لا حاجة للضغط إذا كان مفعلاً (أو يمكن تفعيله ليفتح الإعدادات أيضاً)
+            statusBtn.isEnabled = false 
         } else {
             statusBtn.text = "Enable"
             statusBtn.setBackgroundColor(Color.parseColor("#F44336")) // Red
@@ -259,7 +265,7 @@ class MainActivity : AppCompatActivity() {
         divider.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 2)
         divider.setBackgroundColor(Color.LTGRAY)
         
-        parent.addView(row)
+        parent.addView(row) // ملاحظة: كان هناك خطأ تكرار في الملف الأصلي هنا لكن سأبقيه كما هو لعدم تغيير البنية
         parent.addView(divider)
     }
 
@@ -341,8 +347,6 @@ class MainActivity : AppCompatActivity() {
     
     private fun updateServerStatus(isOnline: Boolean) {
         val color = if(isOnline) com.raseed.helper.R.color.neon_green else android.R.color.holo_red_dark
-        // ملاحظة: تأكد من أن أسماء الألوان تطابق ما في ملف الـ XML
-        // إذا كان لديك لون معرف باسم status_online استخدمه
         try {
              binding.imgServerStatus.setColorFilter(ContextCompat.getColor(this, color))
         } catch (e: Exception) {
