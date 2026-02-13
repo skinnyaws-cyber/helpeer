@@ -15,7 +15,11 @@ object OrderManager {
     private const val TAG = "OrderManager"
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     
-    // المايكروفون الذي يتحدث فيه SmsReceiver
+    // 1. قناة التواصل مع التيرمنال (الشاشة)
+    private val _terminalFlow = MutableSharedFlow<String>()
+    val terminalFlow = _terminalFlow.asSharedFlow()
+
+    // 2. قناة المايكروفون (SmsReceiver)
     private val _smsSharedFlow = MutableSharedFlow<SmsData>()
     val smsSharedFlow = _smsSharedFlow.asSharedFlow()
 
@@ -24,17 +28,23 @@ object OrderManager {
 
     data class SmsData(val amount: Double, val phone: String, val provider: String)
 
+    // دالة مساعدة لطباعة النص في النظام وفي شاشة التطبيق معاً
+    private fun logToUi(message: String) {
+        Log.i(TAG, message) // للنظام
+        scope.launch { _terminalFlow.emit(message) } // للشاشة
+    }
+
     fun startMonitoring() {
         if (firestoreListener != null) return
 
-        Log.i(TAG, "Starting Order Monitoring System (Assistants Mode)...")
+        logToUi(">> System Started. Listening for orders...") // رسالة بداية
         val db = FirebaseFirestore.getInstance()
 
         firestoreListener = db.collection("orders")
             .whereEqualTo("status", "pending")
             .addSnapshotListener { snapshots, e ->
                 if (e != null) {
-                    Log.e(TAG, "Listen failed: $e")
+                    logToUi("!! Error: Listen failed: ${e.message}")
                     return@addSnapshotListener
                 }
 
@@ -61,7 +71,7 @@ object OrderManager {
     }
 
     suspend fun broadcastSmsArrival(amount: Double, phone: String, provider: String) {
-        Log.d(TAG, "Broadcasting SMS: Amount=$amount, Phone=...${phone.takeLast(4)}")
+        logToUi(">> SMS Received: $amount from ...${phone.takeLast(4)} ($provider)")
         _smsSharedFlow.emit(SmsData(amount, phone, provider))
     }
 
@@ -77,7 +87,9 @@ object OrderManager {
         val cleanOrderPhone = normalizePhone(orderPhoneFull)
 
         val assistantJob = scope.launch {
-            Log.i(TAG, "Assistant assigned to Order $orderId ($orderAmount)")
+            logToUi("++ New Order Detected: $orderAmount ($orderProvider)")
+            logToUi("   User Phone: ...${cleanOrderPhone.takeLast(6)}")
+            logToUi("   [Assistant #$orderId] Assigned & Waiting...")
 
             val timeoutMillis = calculateRemainingTime(createdAt)
 
@@ -96,7 +108,8 @@ object OrderManager {
                         val isProviderMatch = orderProvider.contains(sms.provider, ignoreCase = true)
 
                         if (isPhoneMatch && isAmountMatch && isProviderMatch) {
-                            Log.i(TAG, "Assistant for Order $orderId: MATCH FOUND! Processing...")
+                            logToUi("$$ MATCH FOUND for Order #$orderId!")
+                            logToUi("   Processing Confirmation...")
                             
                             confirmOrder(orderId, sms.amount)
                             
@@ -105,7 +118,7 @@ object OrderManager {
                     }
                 }
             } catch (e: TimeoutCancellationException) {
-                Log.w(TAG, "Assistant for Order $orderId: Time is up!")
+                logToUi("-- Order #$orderId Timed Out!")
                 markOrderAsFailed(orderId, "Timeout: No SMS received within 30 mins")
             }
         }
@@ -114,29 +127,39 @@ object OrderManager {
     }
 
     private fun dismissAssistant(orderId: String) {
-        activeAssistants[orderId]?.cancel()
-        activeAssistants.remove(orderId)
+        if (activeAssistants.containsKey(orderId)) {
+            activeAssistants[orderId]?.cancel()
+            activeAssistants.remove(orderId)
+            // logToUi("   [Assistant #$orderId] Dismissed.") // اختياري لتقليل الازعاج
+        }
     }
 
     private fun confirmOrder(orderId: String, amount: Double) {
-        // تم التصحيح: استخدام orderId مباشرة للوصول للوثيقة
         FirebaseFirestore.getInstance().collection("orders").document(orderId)
             .update(mapOf(
                 "status" to "waiting_admin_confirmation",
                 "sms_confirmation_time" to Timestamp.now(),
                 "actual_received_amount" to amount
             ))
-            .addOnSuccessListener { dismissAssistant(orderId) }
+            .addOnSuccessListener { 
+                logToUi("VV Order #$orderId Confirmed Successfully.")
+                dismissAssistant(orderId) 
+            }
+            .addOnFailureListener { e ->
+                logToUi("!! Error Confirming #$orderId: ${e.message}")
+            }
     }
 
     private fun markOrderAsFailed(orderId: String, reason: String) {
-        // تم التصحيح: استخدام orderId مباشرة للوصول للوثيقة
         FirebaseFirestore.getInstance().collection("orders").document(orderId)
             .update(mapOf(
                 "status" to "failed",
                 "failure_reason" to reason
             ))
-            .addOnSuccessListener { dismissAssistant(orderId) }
+            .addOnSuccessListener { 
+                logToUi("XX Order #$orderId Failed: $reason")
+                dismissAssistant(orderId) 
+            }
     }
 
     private fun calculateRemainingTime(createdAt: Timestamp): Long {
