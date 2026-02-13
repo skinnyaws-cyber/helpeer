@@ -1,0 +1,25 @@
+name: Code Scanner 🔍
+
+# هذا التغيير يجعل الـ Workflow لا يعمل إلا إذا ضغطت الزر بنفسك
+on:
+  workflow_dispatch:
+
+jobs:
+  check-code:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up JDK 17
+      uses: actions/setup-java@v3
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: gradle
+
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
+
+    # هذه الخطوة ستقوم بفحص الكود وإظهار الأخطاء دون بناء ملف APK كامل
+    - name: Scan Kotlin Code
+      run: ./gradlew compileDebugKotlin --stacktrace
