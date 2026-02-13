@@ -1,0 +1,36 @@
+name: Android Build & Debug
+
+on:
+    workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    # إعداد Gradle المتوافق مع مشروعك
+    - name: Setup Gradle 8.4
+      uses: gradle/actions/setup-gradle@v3
+      with:
+        gradle-version: '8.4'
+
+    # تشغيل البناء مع عرض تفاصيل الأخطاء البرمجية
+    - name: Build Debug APK
+      run: gradle assembleDebug --no-daemon --stacktrace --info
+      
+    # رفع التطبيق في حال النجاح
+    - name: Upload APK
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: Raseed-Helper-App
+        path: app/build/outputs/apk/debug/app-debug.apk
