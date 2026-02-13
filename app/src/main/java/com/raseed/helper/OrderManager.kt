@@ -120,7 +120,7 @@ object OrderManager {
 
     private fun confirmOrder(orderId: String, amount: Double) {
         // تم التصحيح: استخدام orderId مباشرة للوصول للوثيقة
-        FirebaseFirestore.getInstance().collection("orders").doc(orderId)
+        FirebaseFirestore.getInstance().collection("orders").document(orderId)
             .update(mapOf(
                 "status" to "waiting_admin_confirmation",
                 "sms_confirmation_time" to Timestamp.now(),
@@ -131,7 +131,7 @@ object OrderManager {
 
     private fun markOrderAsFailed(orderId: String, reason: String) {
         // تم التصحيح: استخدام orderId مباشرة للوصول للوثيقة
-        FirebaseFirestore.getInstance().collection("orders").doc(orderId)
+        FirebaseFirestore.getInstance().collection("orders").document(orderId)
             .update(mapOf(
                 "status" to "failed",
                 "failure_reason" to reason
