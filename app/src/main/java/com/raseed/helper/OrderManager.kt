@@ -9,6 +9,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.roundToInt
 
 object OrderManager {
 
@@ -30,14 +31,14 @@ object OrderManager {
 
     // دالة مساعدة لطباعة النص في النظام وفي شاشة التطبيق معاً
     private fun logToUi(message: String) {
-        Log.i(TAG, message) // للنظام
-        scope.launch { _terminalFlow.emit(message) } // للشاشة
+        Log.i(TAG, message) 
+        scope.launch { _terminalFlow.emit(message) } 
     }
 
     fun startMonitoring() {
         if (firestoreListener != null) return
 
-        logToUi(">> System Started. Listening for orders...") // رسالة بداية
+        logToUi(">> System Started. Listening for orders...")
         val db = FirebaseFirestore.getInstance()
 
         firestoreListener = db.collection("orders")
@@ -82,18 +83,28 @@ object OrderManager {
         val orderAmount = doc.getDouble("amount") ?: 0.0
         val orderPhoneFull = doc.getString("userPhone") ?: ""
         val orderProvider = doc.getString("telecomProvider") ?: ""
-        val createdAt = doc.getTimestamp("timestamp") ?: Timestamp.now()
+        
+        // --- التصحيح والتشخيص ---
+        val rawTimestamp = doc.getTimestamp("timestamp")
+        val createdAt = rawTimestamp ?: Timestamp.now()
 
         val cleanOrderPhone = normalizePhone(orderPhoneFull)
 
         val assistantJob = scope.launch {
-            logToUi("++ New Order Detected: $orderAmount ($orderProvider)")
-            logToUi("   User Phone: ...${cleanOrderPhone.takeLast(6)}")
-            logToUi("   [Assistant #$orderId] Assigned & Waiting...")
+            logToUi("++ New Order: $orderAmount ($orderProvider)")
+            
+            // تحذير إذا كان حقل الوقت مفقوداً في قاعدة البيانات
+            if (rawTimestamp == null) {
+                logToUi("?? WARNING: 'timestamp' field missing in DB! Timer reset.")
+            }
 
             val timeoutMillis = calculateRemainingTime(createdAt)
+            val minutesLeft = (timeoutMillis / 1000 / 60).toDouble().roundToInt()
+            
+            logToUi("   Time Left: $minutesLeft mins")
 
             if (timeoutMillis <= 0) {
+                logToUi("-- Order #$orderId Expired! Marking failed...")
                 markOrderAsFailed(orderId, "Expired before processing")
                 return@launch
             }
@@ -130,7 +141,6 @@ object OrderManager {
         if (activeAssistants.containsKey(orderId)) {
             activeAssistants[orderId]?.cancel()
             activeAssistants.remove(orderId)
-            // logToUi("   [Assistant #$orderId] Dismissed.") // اختياري لتقليل الازعاج
         }
     }
 
@@ -157,8 +167,12 @@ object OrderManager {
                 "failure_reason" to reason
             ))
             .addOnSuccessListener { 
-                logToUi("XX Order #$orderId Failed: $reason")
+                logToUi("XX Order #$orderId Marked Failed: $reason")
                 dismissAssistant(orderId) 
+            }
+            .addOnFailureListener { e ->
+                // هذا الجزء كان مفقوداً وهو سبب عدم معرفتك سبب الفشل
+                logToUi("!! DB Error (Fail Update): ${e.message}")
             }
     }
 
