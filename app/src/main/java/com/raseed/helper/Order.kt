@@ -12,6 +12,6 @@ data class Order(
     val transferType: String = "",
     val userFullName: String = "",
     val userId: String = "",
-    val userPhone: String = ""
+    val userPhone: String = "",
     val timestamp: Timestamp? = null
 )
