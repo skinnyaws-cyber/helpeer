@@ -1,6 +1,5 @@
 name: Code Scanner 🔍
 
-# هذا التغيير يجعل الـ Workflow لا يعمل إلا إذا ضغطت الزر بنفسك
 on:
   workflow_dispatch:
 
@@ -15,11 +14,12 @@ jobs:
       with:
         java-version: '17'
         distribution: 'temurin'
-        cache: gradle
 
-    - name: Grant execute permission for gradlew
-      run: chmod +x gradlew
+    - name: Setup Gradle
+      uses: gradle/gradle-build-action@v2
+      with:
+        gradle-version: '8.5' # نحدد إصداراً حديثاً ومتوافقاً
 
-    # هذه الخطوة ستقوم بفحص الكود وإظهار الأخطاء دون بناء ملف APK كامل
+    # هنا التغيير الجوهري: نستخدم gradle مباشرة بدلاً من ./gradlew
     - name: Scan Kotlin Code
-      run: ./gradlew compileDebugKotlin --stacktrace
+      run: gradle compileDebugKotlin --stacktrace
