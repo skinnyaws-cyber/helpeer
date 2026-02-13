@@ -8,7 +8,6 @@ import com.google.firebase.firestore.ListenerRegistration
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.first
 import java.util.concurrent.ConcurrentHashMap
 
 object OrderManager {
@@ -16,27 +15,21 @@ object OrderManager {
     private const val TAG = "OrderManager"
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     
-    // هذا هو "المايكروفون" الذي يتحدث فيه SmsReceiver
-    // SharedFlow يسمح لعدة مساعدين بالاستماع لنفس الرسالة
+    // المايكروفون الذي يتحدث فيه SmsReceiver
     private val _smsSharedFlow = MutableSharedFlow<SmsData>()
     val smsSharedFlow = _smsSharedFlow.asSharedFlow()
 
-    // سجل لتتبع المساعدين النشطين (لكي لا نكرر المساعد لنفس الطلب)
     private val activeAssistants = ConcurrentHashMap<String, Job>()
-    
     private var firestoreListener: ListenerRegistration? = null
 
-    // هيكل بيانات الرسالة القادمة
     data class SmsData(val amount: Double, val phone: String, val provider: String)
 
-    // دالة بدء العمل (يجب استدعاؤها في MainActivity مرة واحدة)
     fun startMonitoring() {
-        if (firestoreListener != null) return // لمنع التكرار
+        if (firestoreListener != null) return
 
         Log.i(TAG, "Starting Order Monitoring System (Assistants Mode)...")
         val db = FirebaseFirestore.getInstance()
 
-        // الاستماع الحي للطلبات المعلقة فقط
         firestoreListener = db.collection("orders")
             .whereEqualTo("status", "pending")
             .addSnapshotListener { snapshots, e ->
@@ -50,18 +43,15 @@ object OrderManager {
                         val orderId = dc.document.id
                         when (dc.type) {
                             DocumentChange.Type.ADDED -> {
-                                // طلب جديد وصل -> تعيين مساعد خاص له
                                 createAssistantForOrder(dc.document)
                             }
                             DocumentChange.Type.MODIFIED -> {
-                                // إذا تغيرت حالة الطلب لشيء غير pending، المساعد ينسحب
                                 val status = dc.document.getString("status")
                                 if (status != "pending") {
                                     dismissAssistant(orderId)
                                 }
                             }
                             DocumentChange.Type.REMOVED -> {
-                                // تم حذف الطلب -> تسريح المساعد
                                 dismissAssistant(orderId)
                             }
                         }
@@ -70,45 +60,35 @@ object OrderManager {
             }
     }
 
-    // دالة يستخدمها SmsReceiver لنشر الخبر
     suspend fun broadcastSmsArrival(amount: Double, phone: String, provider: String) {
         Log.d(TAG, "Broadcasting SMS: Amount=$amount, Phone=...${phone.takeLast(4)}")
         _smsSharedFlow.emit(SmsData(amount, phone, provider))
     }
 
-    // --- منطق المساعد الشخصي (The Assistant) ---
     private fun createAssistantForOrder(doc: com.google.firebase.firestore.DocumentSnapshot) {
         val orderId = doc.id
-        if (activeAssistants.containsKey(orderId)) return // المساعد موجود بالفعل
+        if (activeAssistants.containsKey(orderId)) return
 
-        // قراءة بيانات العميل (الطلب)
         val orderAmount = doc.getDouble("amount") ?: 0.0
         val orderPhoneFull = doc.getString("userPhone") ?: ""
         val orderProvider = doc.getString("telecomProvider") ?: ""
         val createdAt = doc.getTimestamp("timestamp") ?: Timestamp.now()
 
-        // تنظيف رقم هاتف العميل للمقارنة
         val cleanOrderPhone = normalizePhone(orderPhoneFull)
 
-        // إنشاء المساعد في غرفة معزولة (Coroutine)
         val assistantJob = scope.launch {
             Log.i(TAG, "Assistant assigned to Order $orderId ($orderAmount)")
 
-            // حساب الوقت المتبقي من الـ 30 دقيقة
             val timeoutMillis = calculateRemainingTime(createdAt)
 
             if (timeoutMillis <= 0) {
-                // الوقت انتهى أصلاً -> فشل الطلب فوراً
                 markOrderAsFailed(orderId, "Expired before processing")
                 return@launch
             }
 
             try {
-                // المساعد ينتظر لمدة محددة (withTimeout)
                 withTimeout(timeoutMillis) {
-                    // الاستماع للمايكروفون (SharedFlow)
                     smsSharedFlow.collect { sms ->
-                        // هل هذه الرسالة تخص عميلي؟
                         val cleanSmsPhone = normalizePhone(sms.phone)
                         
                         val isPhoneMatch = cleanOrderPhone.endsWith(cleanSmsPhone) || cleanSmsPhone.endsWith(cleanOrderPhone)
@@ -118,17 +98,14 @@ object OrderManager {
                         if (isPhoneMatch && isAmountMatch && isProviderMatch) {
                             Log.i(TAG, "Assistant for Order $orderId: MATCH FOUND! Processing...")
                             
-                            // الموافقة على الطلب
                             confirmOrder(orderId, sms.amount)
                             
-                            // الخروج من الـ collect (إنهاء المهمة)
                             cancel() 
                         }
                     }
                 }
             } catch (e: TimeoutCancellationException) {
-                // انتهى الوقت ولم تصل رسالة مطابقة
-                Log.w(TAG, "Assistant for Order $orderId: Time is up! Marking as failed.")
+                Log.w(TAG, "Assistant for Order $orderId: Time is up!")
                 markOrderAsFailed(orderId, "Timeout: No SMS received within 30 mins")
             }
         }
@@ -139,11 +116,10 @@ object OrderManager {
     private fun dismissAssistant(orderId: String) {
         activeAssistants[orderId]?.cancel()
         activeAssistants.remove(orderId)
-        Log.d(TAG, "Assistant for Order $orderId dismissed.")
     }
 
     private fun confirmOrder(orderId: String, amount: Double) {
-        // التصحيح: نستخدم المسار الكامل بدلاً من doc.reference
+        // تم التصحيح: استخدام orderId مباشرة للوصول للوثيقة
         FirebaseFirestore.getInstance().collection("orders").doc(orderId)
             .update(mapOf(
                 "status" to "waiting_admin_confirmation",
@@ -154,7 +130,7 @@ object OrderManager {
     }
 
     private fun markOrderAsFailed(orderId: String, reason: String) {
-        // التصحيح: نستخدم المسار الكامل بدلاً من doc.reference
+        // تم التصحيح: استخدام orderId مباشرة للوصول للوثيقة
         FirebaseFirestore.getInstance().collection("orders").doc(orderId)
             .update(mapOf(
                 "status" to "failed",
@@ -164,7 +140,7 @@ object OrderManager {
     }
 
     private fun calculateRemainingTime(createdAt: Timestamp): Long {
-        val expiryTime = createdAt.toDate().time + (30 * 60 * 1000) // وقت الإنشاء + 30 دقيقة
+        val expiryTime = createdAt.toDate().time + (30 * 60 * 1000)
         val currentTime = System.currentTimeMillis()
         return expiryTime - currentTime
     }
