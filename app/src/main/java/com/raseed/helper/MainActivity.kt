@@ -105,15 +105,27 @@ class MainActivity : AppCompatActivity() {
 
         try {
             FirebaseApp.initializeApp(this)
-            logToConsole("System Online. Assistants Mode Ready.")
-            updateServerStatus(true)
-            startPulseAnimation()
+            logToConsole("System Online. Authenticating as Admin...")
             
-            // --- تفعيل النظام الجديد (المساعدين) ---
-            OrderManager.startMonitoring()
+            // --- تسجيل الدخول الصامت للسيرفر المساعد ---
+            val auth = com.google.firebase.auth.FirebaseAuth.getInstance()
             
-            // التحقق السريع عند البدء
-            checkPermissionsOnStart()
+            auth.signInWithEmailAndPassword("raseed@helper.com", "awswolf2004")
+                .addOnSuccessListener {
+                    logToConsole("Auth Success: Logged in as Admin.")
+                    updateServerStatus(true)
+                    startPulseAnimation()
+                    
+                    // --- تفعيل النظام الجديد (المساعدين) فقط بعد نجاح تسجيل الدخول ---
+                    OrderManager.startMonitoring()
+                    
+                    // التحقق السريع عند البدء
+                    checkPermissionsOnStart()
+                }
+                .addOnFailureListener { e ->
+                    logToConsole("Auth Failed (Access Denied): ${e.message}")
+                    updateServerStatus(false)
+                }
             
         } catch (e: Exception) {
             logToConsole("Init Failed: ${e.message}")
