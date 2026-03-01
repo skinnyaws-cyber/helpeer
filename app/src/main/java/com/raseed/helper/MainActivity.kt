@@ -131,6 +131,15 @@ class MainActivity : AppCompatActivity() {
             logToConsole("Init Failed: ${e.message}")
             updateServerStatus(false)
         }
+
+        // ضع كود تشغيل الخدمة الدائمة (الدرع الواقي) هنا بالضبط!
+        val serviceIntent = Intent(this, KeepAliveService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(serviceIntent)
+        } else {
+            startService(serviceIntent)
+        }
+        // ===============================================================
     }
 
     // ---------------------------------------------------------
