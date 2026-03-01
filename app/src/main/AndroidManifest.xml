@@ -7,7 +7,7 @@
     <uses-permission android:name="android.permission.READ_SMS"/>
     <uses-permission android:name="android.permission.READ_PHONE_STATE"/>
     <uses-permission android:name="android.permission.CALL_PHONE"/>
-    
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
@@ -31,6 +31,11 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.RaseedHelper"
         tools:targetApi="31">
+
+        <service
+    android:name=".KeepAliveService"
+    android:enabled="true"
+    android:exported="false" />
         
         <activity
             android:name=".MainActivity"
