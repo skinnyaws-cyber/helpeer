@@ -1,7 +1,7 @@
-name: Android Build & Debug
+name: Android Build Release
 
 on:
-    workflow_dispatch:
+  workflow_dispatch:
 
 jobs:
   build:
@@ -23,14 +23,14 @@ jobs:
       with:
         gradle-version: '8.4'
 
-    # تشغيل البناء مع عرض تفاصيل الأخطاء البرمجية
-    - name: Build Debug APK
-      run: gradle assembleDebug --no-daemon --stacktrace --info
+    # تشغيل البناء لنسخة Release الرسمية
+    - name: Build Release APK
+      run: gradle assembleRelease --no-daemon --stacktrace --info
       
     # رفع التطبيق في حال النجاح
     - name: Upload APK
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: Raseed-Helper-App
-        path: app/build/outputs/apk/debug/app-debug.apk
+        name: Raseed-Helper-Release-App
+        path: app/build/outputs/apk/release/*.apk
